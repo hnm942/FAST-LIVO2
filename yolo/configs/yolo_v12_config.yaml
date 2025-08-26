@@ -1,0 +1,41 @@
+# YOLOv8 Configuration
+
+# Model parameters
+model:
+  name: 'yolov8n'
+  input_size: [640, 640]  # Width, Height
+  backbone: 'CSPDarknet'
+  neck: 'C2f'
+  head: 'Detect'
+
+# Classes of interest (COCO dataset indices)
+classes:
+  - 0  # person
+  - 2  # car
+  - 3  # motorcycle
+
+# Detection parameters
+detection:
+  conf_threshold: 0.25    # Confidence threshold
+  iou_threshold: 0.45     # IoU threshold for NMS
+  max_detections: 300     # Maximum number of detections per image
+
+# Augmentation for training (if needed)
+augmentation:
+  hsv_h: 0.015            # HSV-Hue augmentation
+  hsv_s: 0.7              # HSV-Saturation augmentation
+  hsv_v: 0.4              # HSV-Value augmentation
+  degrees: 0.0            # Rotation degrees
+  translate: 0.1          # Translation
+  scale: 0.5              # Scale
+  shear: 0.0              # Shear
+  perspective: 0.0        # Perspective
+  flipud: 0.0             # Flip up-down probability
+  fliplr: 0.5             # Flip left-right probability
+
+# Static object filtering
+static_filter:
+  enabled: true
+  target_classes: [0, 2, 3]  # person, car, motorcycle
+  min_area_ratio: 0.01       # Minimum area ratio to consider
+  max_movement_threshold: 5  # Maximum pixel movement to consider as static
