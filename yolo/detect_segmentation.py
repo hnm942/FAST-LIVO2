@@ -23,10 +23,10 @@ from utils.visualizer import Visualizer
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='YOLOv8 Segmentation')
+    parser = argparse.ArgumentParser(description='YOLO Segmentation')
     parser.add_argument('--source', type=str, default='data/images',
                         help='source directory of images or videos')
-    parser.add_argument('--weights', type=str, default='weights/yolov8n-seg.pt',
+    parser.add_argument('--weights', type=str, default='weights/yolo11n-seg.pt',
                         help='path to model weights')
     parser.add_argument('--config', type=str, default='configs/yolo_v12_config.yaml',
                         help='path to configuration file')
