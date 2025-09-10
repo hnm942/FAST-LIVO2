@@ -24,10 +24,14 @@ from utils.visualizer import Visualizer
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='YOLO Segmentation')
-    parser.add_argument('--source', type=str, default='data/images',
+    parser.add_argument('--source', type=str, default='../images',
                         help='source directory of images or videos')
     parser.add_argument('--weights', type=str, default='weights/yolo11n-seg.pt',
                         help='path to model weights')
+    parser.add_argument('--model-type', type=str, choices=['yolo11n', 'yolo8n', 'both'], default='yolo11n',
+                        help='choose model type: yolo11n, yolo8n, or both for comparison')
+    parser.add_argument('--save-walkability-mask', action='store_true',
+                        help='save walkability mask (0=non-walkable/person areas, 1=walkable areas)')
     parser.add_argument('--config', type=str, default='configs/yolo_v12_config.yaml',
                         help='path to configuration file')
     parser.add_argument('--output', type=str, default='results/segmentation',
@@ -60,6 +64,8 @@ def parse_args():
                         help='mask transparency (0-1)')
     parser.add_argument('--export-excel', action='store_true',
                         help='export inference time results to Excel')
+    parser.add_argument('--export-csv', action='store_true',
+                        help='export inference time results to CSV')
     return parser.parse_args()
 
 
@@ -111,7 +117,42 @@ def apply_segmentation_mask(image, mask, color, alpha=0.5):
     return result
 
 
-def process_image(model, img_path, conf_thres, iou_thres, target_classes, args, inference_data=None):
+def generate_walkability_mask(results, img_shape, person_class_id=0):
+    """Generate walkability mask where 0=non-walkable (person areas), 1=walkable areas
+    
+    Args:
+        results: YOLO detection results
+        img_shape: Image shape (height, width)
+        person_class_id: Class ID for person (default: 0)
+        
+    Returns:
+        Binary mask where 0=non-walkable, 1=walkable
+    """
+    h, w = img_shape[:2]
+    walkability_mask = np.ones((h, w), dtype=np.uint8)  # Start with all walkable (1)
+    
+    # Process results to mark person areas as non-walkable (0)
+    for result in results:
+        if hasattr(result, 'masks') and result.masks is not None:
+            class_ids = result.boxes.cls.cpu().numpy().astype(int)
+            
+            # Process each detection
+            for j, class_id in enumerate(class_ids):
+                if class_id == person_class_id:  # Person class
+                    if j < len(result.masks):
+                        # Get the mask
+                        mask = result.masks[j].data.cpu().numpy()
+                        
+                        # Resize mask to match image dimensions
+                        mask = cv2.resize(mask[0].astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+                        
+                        # Mark person areas as non-walkable (0)
+                        walkability_mask[mask > 0] = 0
+    
+    return walkability_mask
+
+
+def process_image(model, img_path, conf_thres, iou_thres, target_classes, args, inference_data=None, model_name=''):
     """Process a single image with the segmentation model"""
     # Get filename without extension
     filename = os.path.basename(img_path)
@@ -126,17 +167,24 @@ def process_image(model, img_path, conf_thres, iou_thres, target_classes, args, 
     # Get image dimensions
     h, w = img.shape[:2]
     
-    # Measure inference time
+    # Measure inference time with error handling
     start_time = time.time()
-    results = model(img_path, conf=conf_thres, iou=iou_thres)
-    inference_time = time.time() - start_time
-    print(f"Inference time: {inference_time:.4f} seconds")
+    try:
+        results = model(img_path, conf=conf_thres, iou=iou_thres)
+        inference_time = time.time() - start_time
+        print(f"Inference time ({model_name}): {inference_time:.4f} seconds")
+    except Exception as e:
+        print(f"Error during inference with {model_name}: {e}")
+        print(f"Skipping image {filename} for model {model_name}")
+        return None
     
     # Store inference data if requested
     if inference_data is not None:
         inference_data.append({
             'file_name': os.path.basename(img_path),
             'file_type': 'image',
+            'model_name': model_name if model_name else 'unknown',
+            'model_type': 'PyTorch',
             'resolution': f"{w}x{h}",
             'inference_time': inference_time,
             'num_objects': sum(len(result.boxes) for result in results),
@@ -229,8 +277,17 @@ def process_image(model, img_path, conf_thres, iou_thres, target_classes, args, 
             print(f"No segmentation masks found for {filename}")
     
     # Save output image
-    output_path = os.path.join(args.output, f"{base_filename}_seg.jpg")
+    suffix = f"_{model_name}" if model_name else ""
+    output_path = os.path.join(args.output, f"{base_filename}_seg{suffix}.jpg")
     cv2.imwrite(output_path, output_img)
+    
+    # Generate and save walkability mask if requested
+    if args.save_walkability_mask:
+        walkability_mask = generate_walkability_mask(results, img.shape, person_class_id=0)
+        mask_path = os.path.join(args.output, f"{base_filename}_walkability{suffix}.png")
+        # Save as grayscale image (0=black/non-walkable, 255=white/walkable)
+        cv2.imwrite(mask_path, walkability_mask * 255)
+        print(f"Walkability mask saved to {mask_path}")
     
     # Save detection results as text if requested
     if args.save_txt:
@@ -256,7 +313,7 @@ def process_image(model, img_path, conf_thres, iou_thres, target_classes, args, 
     return output_img
 
 
-def process_video(model, video_path, conf_thres, iou_thres, target_classes, args, inference_data=None):
+def process_video(model, video_path, conf_thres, iou_thres, target_classes, args, inference_data=None, model_name=''):
     """Process a video with the segmentation model"""
     # Get filename without extension
     filename = os.path.basename(video_path)
@@ -281,7 +338,8 @@ def process_video(model, video_path, conf_thres, iou_thres, target_classes, args
     output_video = None
     output_path = None
     if args.save_vid:
-        output_path = os.path.join(args.output, f"{base_filename}_seg.mp4")
+        suffix = f"_{model_name}" if model_name else ""
+        output_path = os.path.join(args.output, f"{base_filename}_seg{suffix}.mp4")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'XVID'
         output_video = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
@@ -299,16 +357,25 @@ def process_video(model, video_path, conf_thres, iou_thres, target_classes, args
             # Get frame dimensions
             h, w = frame.shape[:2]
             
-            # Measure inference time for this frame
+            # Measure inference time for this frame with error handling
             start_time = time.time()
-            results = model(frame, conf=conf_thres, iou=iou_thres)
-            frame_inference_time = time.time() - start_time
+            try:
+                results = model(frame, conf=conf_thres, iou=iou_thres)
+                frame_inference_time = time.time() - start_time
+            except Exception as e:
+                print(f"Error during inference with {model_name} on frame {frame_count}: {e}")
+                print(f"Skipping frame {frame_count} for model {model_name}")
+                frame_count += 1
+                pbar.update(1)
+                continue
             
             # Store inference data if requested (sample every 10 frames to avoid too much data)
             if inference_data is not None and frame_count % 10 == 0:
                 inference_data.append({
                     'file_name': f"{os.path.basename(video_path)}_frame_{frame_count}",
                     'file_type': 'video_frame',
+                    'model_name': model_name if model_name else 'unknown',
+                    'model_type': 'PyTorch',
                     'resolution': f"{w}x{h}",
                     'inference_time': frame_inference_time,
                     'num_objects': sum(len(result.boxes) for result in results),
@@ -471,12 +538,42 @@ def export_inference_data_to_excel(inference_data, output_dir):
     return excel_path
 
 
+def export_inference_data_to_csv(inference_data, output_dir):
+    """Export inference time data to CSV file"""
+    if not inference_data:
+        print("No inference data to export")
+        return
+    
+    # Create DataFrame from inference data
+    df = pd.DataFrame(inference_data)
+    
+    # Create CSV file path
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = os.path.join(output_dir, f"inference_results_{timestamp}.csv")
+    
+    # Export to CSV
+    df.to_csv(csv_path, index=False)
+    print(f"Inference data exported to {csv_path}")
+    
+    # Create summary statistics CSV
+    stats = df.groupby('file_type').agg({
+        'inference_time': ['mean', 'min', 'max', 'std'],
+        'num_objects': ['mean', 'min', 'max', 'sum']
+    })
+    stats_path = os.path.join(output_dir, f"inference_summary_{timestamp}.csv")
+    stats.to_csv(stats_path)
+    print(f"Summary statistics exported to {stats_path}")
+    
+    return csv_path
+
+
 def main():
     # Parse command line arguments
     args = parse_args()
     
-    # Always enable view_img by default
-    args.view_img = True
+    # Disable view_img by default for batch processing
+    if not hasattr(args, 'view_img') or args.view_img is None:
+        args.view_img = False
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output, exist_ok=True)
@@ -491,22 +588,73 @@ def main():
     # Set target classes from config or command line arguments
     target_classes = args.classes if args.classes is not None else config['classes']
     
-    # Initialize list to store inference data if Excel export is requested
-    inference_data = [] if args.export_excel else None
+    # Initialize list to store inference data if Excel or CSV export is requested
+    inference_data = [] if (args.export_excel or args.export_csv) else None
     
-    # Initialize model
-    print(f"Loading YOLOv8 segmentation model from {args.weights}...")
-    try:
-        # Try to load with Ultralytics YOLO
-        model = YOLO(args.weights)
-        
-        # Check if it's a segmentation model
-        if not any(task in str(model.task) for task in ['segment', 'seg']):
-            print(f"Warning: The model {args.weights} may not be a segmentation model.")
-            print("Make sure you're using a YOLOv8 model with the '-seg' suffix.")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Please make sure you have the correct weights file and it's compatible with YOLOv8 segmentation.")
+    # Determine which models to load based on model_type parameter
+    models_to_use = []
+    
+    if args.model_type == 'yolo11n':
+        weight_path = 'weights/yolo11n-seg.pt'
+        models_to_use.append(('yolo11n', weight_path))
+    elif args.model_type == 'yolo8n':
+        weight_path = 'weights/yolo8n-seg.pt'
+        models_to_use.append(('yolo8n', weight_path))
+    elif args.model_type == 'both':
+        models_to_use.append(('yolo11n', 'weights/yolo11n-seg.pt'))
+        models_to_use.append(('yolo8n', 'weights/yolo8n-seg.pt'))
+    
+    # If weights argument is provided, override the default paths
+    if args.weights != 'weights/yolo11n-seg.pt':
+        if args.model_type == 'both':
+            print("Warning: --weights argument ignored when using --model-type both")
+        else:
+            models_to_use[0] = (models_to_use[0][0], args.weights)
+    
+    # Initialize models
+    loaded_models = []
+    for model_name, weight_path in models_to_use:
+        print(f"Loading {model_name} segmentation model from {weight_path}...")
+        try:
+            # Try to load with Ultralytics YOLO
+            model = YOLO(weight_path)
+            
+            # Test the model with a small dummy inference to catch compatibility issues early
+            try:
+                # Create a small test image
+                test_img = np.zeros((320, 320, 3), dtype=np.uint8)
+                test_results = model(test_img, conf=0.5, verbose=False)
+                print(f"Model {model_name} compatibility test passed")
+            except Exception as test_e:
+                print(f"Model {model_name} failed compatibility test: {test_e}")
+                if 'qkv' in str(test_e) or 'AAttn' in str(test_e):
+                    print(f"Model compatibility issue detected. This model may require a different version of Ultralytics.")
+                    print(f"Consider using a different model version.")
+                raise test_e
+            
+            # Check if it's a segmentation model
+            if not any(task in str(model.task) for task in ['segment', 'seg']):
+                print(f"Warning: The model {weight_path} may not be a segmentation model.")
+                print("Make sure you're using a YOLO model with the '-seg' suffix.")
+            
+            loaded_models.append((model_name, model))
+            print(f"Successfully loaded {model_name} model")
+            
+        except Exception as e:
+            print(f"Error loading {model_name} model from {weight_path}: {e}")
+            if 'qkv' in str(e) or 'AAttn' in str(e):
+                print(f"Model compatibility issue: This model requires a different Ultralytics version.")
+                print(f"Try using YOLOv11 or YOLOv8 model instead: --model-type yolo11n or --model-type yolo8n")
+            else:
+                print("Please make sure you have the correct weights file and it's compatible with YOLO segmentation.")
+            
+            if len(models_to_use) == 1:  # If only one model and it fails, exit
+                sys.exit(1)
+            else:  # If multiple models, continue with others
+                print(f"Continuing with other models...")
+    
+    if not loaded_models:
+        print("Error: No models could be loaded successfully.")
         sys.exit(1)
     
     # Determine file type (image or video)
@@ -532,13 +680,15 @@ def main():
         if img_files:
             print(f"Found {len(img_files)} images. Processing...")
             for img_path in tqdm(img_files):
-                process_image(model, img_path, conf_thres, iou_thres, target_classes, args, inference_data)
+                for model_name, model in loaded_models:
+                    process_image(model, img_path, conf_thres, iou_thres, target_classes, args, inference_data, model_name)
         
         # Process videos
         if video_files:
             print(f"Found {len(video_files)} videos. Processing...")
             for video_path in video_files:
-                process_video(model, video_path, conf_thres, iou_thres, target_classes, args, inference_data)
+                for model_name, model in loaded_models:
+                    process_video(model, video_path, conf_thres, iou_thres, target_classes, args, inference_data, model_name)
                 
         if not img_files and not video_files:
             print(f"No images or videos found in {args.source}")
@@ -547,10 +697,12 @@ def main():
         # Process a single file
         if source_path.suffix.lower() in img_extensions:
             print(f"Processing image: {args.source}")
-            process_image(model, str(source_path), conf_thres, iou_thres, target_classes, args, inference_data)
+            for model_name, model in loaded_models:
+                process_image(model, str(source_path), conf_thres, iou_thres, target_classes, args, inference_data, model_name)
         elif source_path.suffix.lower() in video_extensions:
             print(f"Processing video: {args.source}")
-            process_video(model, str(source_path), conf_thres, iou_thres, target_classes, args, inference_data)
+            for model_name, model in loaded_models:
+                process_video(model, str(source_path), conf_thres, iou_thres, target_classes, args, inference_data)
         else:
             print(f"Unsupported file type: {source_path.suffix}")
             sys.exit(1)
@@ -563,6 +715,11 @@ def main():
     if args.export_excel and inference_data:
         excel_path = export_inference_data_to_excel(inference_data, args.output)
         print(f"Inference time data exported to {excel_path}")
+    
+    # Export inference data to CSV if requested
+    if args.export_csv and inference_data:
+        csv_path = export_inference_data_to_csv(inference_data, args.output)
+        print(f"Inference time data exported to {csv_path}")
     
     print(f"Segmentation complete. Results saved to {args.output}")
 

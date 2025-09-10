@@ -237,7 +237,7 @@ def main():
     target_classes = args.classes if args.classes is not None else config['classes']
     
     # Initialize model
-    print(f"Loading YOLOv8 model from {args.weights}...")
+    print(f"Loading YOLO-seg model from {args.weights}...")
     try:
         # Try to load with Ultralytics YOLO
         model = YOLO(args.weights)

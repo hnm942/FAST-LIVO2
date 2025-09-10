@@ -1,2 +1,5 @@
 Log/*
 build/*
+data
+images
+venv
